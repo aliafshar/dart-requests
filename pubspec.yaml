@@ -1,0 +1,6 @@
+name:  requests
+description:  HTTP Client Library
+
+dependencies:
+#  js: any
+  unittest: any
