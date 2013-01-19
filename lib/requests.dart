@@ -1,19 +1,68 @@
 
 import 'dart:io';
 import 'dart:uri';
+import 'dart:json';
+
+
+
+abstract class Data {
+  ContentType contentType;
+  InputStream stream;
+  int contentLength;
+}
+
+
+class StringData implements Data {
+
+  final ContentType contentType;
+  final InputStream stream = new ListInputStream();
+  int contentLength;
+
+  StringData(String data, this.contentType, [encoding = Encoding.UTF_8]) {
+    ListInputStream s = stream;
+    s.write(data.charCodes);
+    contentLength = data.charCodes.length;
+  }
+
+}
+
+
+class JsonData extends StringData {
+
+  JsonData(dynamic data) :
+    super( JSON.stringify(data)
+         , new ContentType.fromString('application/json'));
+}
+
+
+class StreamData implements Data {
+
+  final InputStream stream;
+  final ContentType contentType;
+
+  StreamData(this.stream, this.contentType);
+
+}
 
 
 class Request {
 
   String method;
   String url;
-  String data;
+  Data data;
   List<Cookie> cookies;
   Map<String, String> params;
   Map<String, String> headers;
+  bool stream;
   List<String> parts;
   List<InputStream> partStreams;
+
   HttpClient client = new HttpClient();
+  HttpClientRequest raw;
+
+  Response response = new Response();
+
+  Completer<Response> finished = new Completer<Response>();
 
   Request
     ( this.method
@@ -21,11 +70,11 @@ class Request {
     ,
     { Map<String, String> params
     , this.data
-    , InputStream dataStream
     , Map<String, String> headers
     , List<Cookie> cookies
     , List<String> parts
     , List<InputStream> partStreams
+    , this.stream : false
     }) {
     this.params = (params != null) ? params : <String>{};
     this.headers = (headers != null) ? headers : <String>{};
@@ -38,29 +87,90 @@ class Request {
     return mergeArgs(new Uri(url), params);
   }
 
-  execute() {
+  Future<Response> execute() {
     var conn = client.openUrl(method, actualUrl);
-    conn.onError = onError;
-    conn.onResponse = onResponse;
-    conn.onRequest = onRequest;
+    conn.onError = _onError;
+    conn.onResponse = _onResponse;
+    conn.onRequest = _onRequest;
+    response._finished.future.then((response) {
+      finished.complete(response);
+      client.shutdown();
+    });
+    return finished.future;
   }
 
-  onRequest(HttpClientRequest request) {
-
+  _onRequest(HttpClientRequest raw) {
+    this.raw = raw;
+    if (data != null) {
+      raw.headers.set(HttpHeaders.CONNECTION, 'close');
+      raw.headers.set(HttpHeaders.CONTENT_LENGTH, data.contentLength);
+      raw.headers.set(HttpHeaders.TRANSFER_ENCODING, 'chunked');
+      raw.headers.set(HttpHeaders.CONTENT_TYPE, data.contentType.toString());
+      data.stream.pipe(raw.outputStream);
+      //raw.outputStream.write(data.stream.read());
+    } else {
+      raw.outputStream.close();
+    }
   }
 
-
-  onResponse(HttpClientResponse response) {
-
+  _onClosed() {
+    print('closed');
   }
 
-  onError(Exception e) {
+  _onResponse(HttpClientResponse raw) {
+    response._bind(this, raw);
+  }
 
+  _onError(var e) {
+    print(e);
   }
 
 }
 
 class Response {
+
+  Request request;
+  HttpClientResponse raw;
+
+  final _bodyBuffer = new StringBuffer();
+
+  final Completer<Response> _finished = new Completer<Response>();
+
+  Response();
+
+  HttpHeaders get headers => raw.headers;
+  List<Cookie> get cookies => raw.cookies;
+  int get statusCode => raw.statusCode;
+
+  _bind(request, raw) {
+    this.request = request;
+    this.raw = raw;
+    if (request.stream) {
+      _finished.complete(this);
+    }
+    else {
+      raw.inputStream.onData = _onData;
+      raw.inputStream.onClosed = _onClosed;
+    }
+
+  }
+
+  _onData() {
+    var data = raw.inputStream.read(1024);
+    data.forEach((c) => _bodyBuffer.addCharCode(c));
+  }
+
+  _onClosed() {
+    _finished.complete(this);
+  }
+
+  String get content {
+    return _bodyBuffer.toString();
+  }
+
+  dynamic get json {
+    return JSON.parse(content);
+  }
 
 }
 
@@ -114,8 +224,7 @@ Future<Response> request
     , url
     ,
     { Map<String, String> params
-    , String data
-    , InputStream dataStream
+    , Data data
     , Map<String, String> headers
     , List<Cookie> cookies
     , List<String> parts
@@ -123,19 +232,20 @@ Future<Response> request
     }) {
 
   var r = new Request( method, url
-                      , params: params
-                      , data: data
-                      , dataStream: dataStream
-                      , headers: headers
-                      , cookies: cookies
-                      , parts: parts
-                      , partStreams: partStreams
-                      );
-  print(r.params);
-  print(r.headers);
+                     , params: params
+                     , data: data
+                     , headers: headers
+                     , cookies: cookies
+                     , parts: parts
+                     , partStreams: partStreams
+                     );
+  return r.execute();
 }
 
 main() {
-  var u = 'http://google.com?banana=lemon';
-  request('GET', u, params : {'a': 'b'});
+  SecureSocket.initialize();
+  var u = 'https://www.googleapis.com/discovery/v1/apis/urlshortener/v1/rest';
+  //request('GET', u).then((resp) => print(resp.json));
+  request('POST', 'http://localhost:8000',
+      data : new JsonData({'a':'b'})).then((resp) => print(resp.content));
 }
